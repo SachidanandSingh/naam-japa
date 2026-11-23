@@ -1,0 +1,96 @@
+name: Build iPhone app
+
+# Builds an unsigned .ipa of the Naam Japa app on a GitHub Mac.
+# Run it from the Actions tab: "Build iPhone app" -> "Run workflow".
+# The finished file appears under "Artifacts" at the bottom of the run page.
+# SideStore signs it with your own Apple ID when you install it on the phone.
+
+on:
+  workflow_dispatch:
+
+env:
+  CI: "1"
+  EXPO_NO_TELEMETRY: "1"
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 60
+
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install packages
+        run: npm ci
+
+      - name: Create the iPhone project
+        run: npx expo prebuild --platform ios --clean
+
+      - name: Remove the push-notification entitlement
+        # Reminders here are local, so push is not needed, and a free Apple ID
+        # cannot sign apps that ask for it.
+        run: |
+          for f in ios/*/*.entitlements; do
+            [ -f "$f" ] || continue
+            /usr/libexec/PlistBuddy -c "Delete :aps-environment" "$f" || true
+            echo "--- $f"
+            cat "$f"
+          done
+
+      - name: Show tool versions
+        run: |
+          xcodebuild -version
+          node -v
+          pod --version
+
+      - name: Build the app without signing
+        run: |
+          set -eo pipefail
+          WORKSPACE=$(ls -d ios/*.xcworkspace | head -n 1)
+          SCHEME=$(basename "$WORKSPACE" .xcworkspace)
+          echo "Building $SCHEME from $WORKSPACE"
+          xcodebuild \
+            -workspace "$WORKSPACE" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            2>&1 | tee xcodebuild.log
+
+      - name: Package the .ipa
+        run: |
+          set -e
+          APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" | head -n 1)
+          echo "Found app: $APP"
+          rm -rf Payload NaamJapa.ipa
+          mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qry NaamJapa.ipa Payload
+          ls -lh NaamJapa.ipa
+
+      - name: Save the .ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: NaamJapa-ipa
+          path: NaamJapa.ipa
+          if-no-files-found: error
+
+      - name: Save the build log if something went wrong
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: xcodebuild.log
+          if-no-files-found: ignore
